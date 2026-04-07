@@ -209,6 +209,9 @@ Upload PDFs with **Company**, **Version**, and optional **Client / workspace**, 
 ## Repository layout
 
 ```
+README.md              # this file — architecture & assessment narrative
+.env.example           # copy to .env; Ollama / API / DATABASE_URL options
+PUSH_TO_GITHUB.md      # git remote + push steps
 app.py                 # Streamlit UI
 docker-compose.yml     # Postgres + pgvector
 scripts/run.sh         # Ollama + venv + Streamlit helper
