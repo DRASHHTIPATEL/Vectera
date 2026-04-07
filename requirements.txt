@@ -1,0 +1,13 @@
+# RAG investment document analyzer
+streamlit>=1.28.0
+pypdf>=4.0.0
+pdfplumber>=0.11.0
+sqlalchemy>=2.0.0
+faiss-cpu>=1.7.4
+numpy>=1.24.0
+sentence-transformers>=2.2.0
+torch>=2.0.0
+openai>=1.12.0
+python-dotenv>=1.0.0
+psycopg2-binary>=2.9.9
+pgvector>=0.2.5

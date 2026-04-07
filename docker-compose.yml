@@ -1,0 +1,23 @@
+# Postgres with pgvector — matches the assessment “managed database” path (Snowflake or equivalent).
+# Start: docker compose up -d
+# Then set DATABASE_URL=postgresql://vectera:vectera@localhost:5432/vectera in .env
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: vectera
+      POSTGRES_PASSWORD: vectera
+      POSTGRES_DB: vectera
+    ports:
+      - "5432:5432"
+    volumes:
+      - vectera_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vectera -d vectera"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  vectera_pgdata:
