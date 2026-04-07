@@ -15,6 +15,7 @@ This is intentionally **not** production infrastructure — it is meant to show 
 | README (this file) | `README.md` |
 | Demo (5–10 min) | `DEMO.md` + record or live session |
 | Submission handoff | `SUBMISSION.md` (checklist: repo link, env, what to show) |
+| Push to GitHub | `PUSH_TO_GITHUB.md` (commands — requires your account) |
 
 ---
 
