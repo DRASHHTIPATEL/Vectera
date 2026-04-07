@@ -41,6 +41,96 @@ This is intentionally **not** production infrastructure — it is meant to show 
 
 ---
 
+## Official brief checklist (Vectera.ai — full pass/fail)
+
+Below is the assessment text mapped to this repo. **Snowflake** is listed as preferred in the brief; I use **PostgreSQL + pgvector** as an **equivalent database service** (Supabase/RDS/Neon-compatible) with `docker-compose.yml`, and document how this maps to Snowflake. **SQLite + FAISS** is a documented local fallback when `DATABASE_URL` is unset.
+
+### Required technologies
+
+| Brief | Met? | Where |
+|-------|------|--------|
+| **Python** | Yes | All application code |
+| **Database: Snowflake (preferred) OR equivalent (Postgres, Supabase, …)** | Yes | **Postgres + pgvector:** `src/postgres_db.py`, `docker-compose.yml`, `DATABASE_URL`. **Equivalent** to the brief. **SQLite + FAISS:** `src/database.py`, `src/faiss_store.py` — dev fallback only. |
+| **Store and retrieve document data using this database layer** | Yes | Chunks + metadata in DB; vectors in Postgres (`embedding` column) or FAISS (SQLite mode). Retrieval via `src/persistence.py`. |
+
+### Functional requirements (core)
+
+| Brief | Met? | Where |
+|-------|------|--------|
+| Document ingestion (PDF → text) | Yes | `src/ingestion.py` |
+| Chunking | Yes | `src/chunking.py` |
+| Embedding + retrieval | Yes | `src/embeddings.py`, `src/retrieval.py`, `src/persistence.py` |
+| LLM-based answer generation | Yes | `src/rag.py` (OpenAI-compatible API; **Ollama** supported via `.env`) |
+| **Citations (required)** | Yes | `SYSTEM_PROMPT` in `src/rag.py` forces **Sources** + inline citations; UI shows answer + **Retrieved context** |
+| Responses reference source documents and/or sections | Yes | Document name, page, version in context headers and **Sources** block |
+
+### Application requirement
+
+| Brief | Met? | Where |
+|-------|------|--------|
+| **Working UI — not CLI-only** | Yes | **Streamlit** `app.py` (recommended path from brief) |
+
+### Key capabilities to demonstrate
+
+| Brief | Met? | How |
+|-------|------|-----|
+| **1. Version awareness** — avoid blindly mixing conflicting values across versions | Yes | User-set **version** label on ingest → stored per chunk → prompt rules 3–4 in `src/rag.py` |
+| **2. Cross-document reasoning & conflicts** — attribution, don’t merge conflicting facts | Yes | Diversified retrieval (`src/retrieval.py`) + prompt rules 2–3, **Conflicts** section in output |
+| **3. Charts, tables, structured content** — extract tables OR explain limitations | Yes | `pdfplumber` tables in `src/ingestion.py`; chart/image heuristic + prompt rules 6–7 in `src/rag.py` |
+
+### README required write-up (brief)
+
+| Brief asks for | Section in this file |
+|----------------|----------------------|
+| System architecture (high-level) | [System architecture](#system-architecture-high-level) |
+| How you used the database (Snowflake or equivalent) | [How I used the database](#how-i-used-the-database-snowflake-vs-equivalent) |
+| Chunking strategy | [Chunking strategy](#chunking-strategy) |
+| Retrieval approach | [Retrieval approach](#retrieval-approach) |
+| Versioning | [Version awareness](#version-awareness) |
+| Conflicting information | [Conflicting information](#conflicting-information) |
+| Charts/tables | [Charts, tables, and structured content](#charts-tables-and-structured-content) |
+| Known limitations | [Known limitations](#known-limitations) |
+| What you would improve with more time | [What I would improve with more time](#what-i-would-improve-with-more-time) |
+
+### Deliverables (brief)
+
+| Brief | Met? | Where |
+|-------|------|--------|
+| Working application — ask questions, answers **with citations** | Yes | `app.py` |
+| Code repository — setup, **configure database**, environment, **how to run** | Yes | This README + `.env.example` + `PUSH_TO_GITHUB.md` |
+| README (important) | Yes | This file |
+| Demo (5–10 min), example queries | Yes | `DEMO.md` |
+
+### Example questions (from brief — try in the UI)
+
+- “What is [Company X]’s key strategy?”
+- “How has [metric] changed across document versions?”
+- “What drives demand according to these materials?”
+- “Are there conflicting data points across documents?”
+- “Summarize key trends shown in the documents”
+
+### Evaluation criteria (how the design responds)
+
+| Criterion | Addressed by |
+|-----------|----------------|
+| **Retrieval quality / grounding** | Diversified retrieval + audit expander in UI + strict `SYSTEM_PROMPT` |
+| **Complexity: versions, conflicts, chart limits** | Sections above + `src/rag.py`, `src/ingestion.py` |
+| **System design / tradeoffs / scale** | Architecture narrative, Postgres vs SQLite, Snowflake mapping, limitations & improvements |
+| **Code quality** | Modular `src/` layout, `persistence` abstraction |
+| **Communication** | This README + `DEMO.md` |
+
+### Optional (brief)
+
+| Brief | Met? | Where |
+|-------|------|--------|
+| Documents may belong to different clients — how you’d approach access control | Yes | [Multi-client documents](#multi-client-documents-optional-consideration) — `client_label` + future RLS/OIDC narrative |
+
+### Out of scope (brief says not expected)
+
+Perfect chart extraction, complete conflict resolution, production-grade infra — **explicitly** not claimed; limitations are stated.
+
+---
+
 ## System architecture (high-level)
 
 1. **Ingestion** (`src/ingestion.py`) — PDF → text per page with `pdfplumber`; tables flattened to text when extraction succeeds; weak text + images triggers a **chart limitation** note.
