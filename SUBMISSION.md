@@ -6,7 +6,7 @@ Use this when handing in the take-home.
 
 | Item | Status |
 |------|--------|
-| **Git repository** (GitHub or similar) | Push this project; add the remote URL in your email or form. |
+| **Git repository** (GitHub or similar) | **Local commits are done** — push using `PUSH_TO_GITHUB.md` (needs your GitHub login). |
 | **README** | `README.md` — architecture, database, chunking, retrieval, versions, conflicts, charts, limitations, improvements. |
 | **Working app (not CLI)** | `streamlit run app.py` or `./scripts/run.sh` |
 | **Demo (5–10 min)** | Follow `DEMO.md`; record (Loom, QuickTime, etc.) or do a live session. |
