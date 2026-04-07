@@ -2,6 +2,9 @@
 
 Hi — this is my submission for the **Vectera.ai RAG technical assessment**.
 
+This project is a Retrieval-Augmented Generation (RAG) system designed to analyze investment documents and generate structured, source-grounded insights. The system focuses on handling real-world complexity including multiple document versions, conflicting information, and cross-document reasoning.
+
+
 I wanted something I could actually run end-to-end on a laptop: upload PDFs, ask questions, and get answers that **stick to the retrieved text** with **citations**, instead of the model free-styling. Along the way I tried to handle the messy stuff that shows up in real decks — **multiple versions of the same company**, **documents that disagree**, and **slides that are mostly charts** (where extraction falls apart).
 
 This isn’t production infrastructure; it’s a honest slice of how I’d structure the problem and where I’d cut corners.
