@@ -1,60 +1,33 @@
-# Demo script (5–10 minutes)
+# Demo (about 5–10 minutes)
 
-Use for a **recorded** walkthrough or **live** review.
+Here’s how I’d walk someone through this — recorded or live.
 
-## Prerequisites (pick what matches your `.env`)
+Before you hit record: pick your LLM path (**Ollama** with `USE_OLLAMA=1`, or a cloud key with `USE_OLLAMA=0`). If you have Docker, `docker compose up -d` + `DATABASE_URL` in `.env` is a nice story for Postgres; if not, just say you’re on **SQLite + FAISS** locally — that’s honest and the app supports it.
 
-- **LLM:** Either **Ollama** (`USE_OLLAMA=1`, `ollama serve`, `ollama pull llama3.2`) **or** a cloud key (`OPENAI_API_KEY`, `USE_OLLAMA=0`).
-- **Database (recommended for the assessment narrative):** `docker compose up -d`, set `DATABASE_URL` in `.env` for **Postgres + pgvector**.  
-  If you skip Docker, say explicitly that you’re on **SQLite + FAISS** for the demo machine.
+**1 — Setup (~1 min)**  
+Open the README, scroll to the mermaid diagram, explain in one sentence: PDFs → chunks → embeddings → DB → retrieve → LLM. Start the app (`streamlit run app.py` or `./scripts/run.sh`). Point at the sidebar: **Client**, **Company**, **Version** — the version field matters for “compare across versions” questions.
 
-## 1. Setup (~1 min)
+**2 — Ingest (~2 min)**  
+Upload two PDFs for the **same company** with **different version labels** (e.g. `2023-deck` vs `2024-deck`). Add another PDF from a **different company** or a third-party report so retrieval isn’t one document only. Check the indexed list in the sidebar.
 
-- Show `README.md` architecture (mermaid diagram) and **how data is stored** (Postgres+pgvector vs SQLite+FAISS).
-- Start the app: `streamlit run app.py` or `./scripts/run.sh`.
-- Point out sidebar: **Client / workspace**, **Company**, **Version** — version labels drive **version-aware** answers.
+**3 — Version question (~2 min)**  
+Ask something like: *“How has [metric or strategy] changed across document versions for [Company X]?”*  
+Call out that answers should tie back to **version labels** and **document + page** in Sources.
 
-## 2. Ingest (~2 min)
+**4 — Conflicts (~2 min)**  
+Ask: *“Are there conflicting data points across these materials on [topic]?”*  
+Emphasize you’re **not** looking for the model to average two numbers — Conflicts section + separate attributions.
 
-- Upload **two PDFs** for the same company with **different version labels** (e.g. `2023-deck` vs `2024-deck`).
-- Upload at least one PDF for a **second company** (or third-party report) so **multi-source** retrieval is visible.
-- Confirm **Indexed documents** updates; note **backend** line (Postgres vs SQLite).
+**5 — Charts / tables (~1 min)**  
+If you have a chart-heavy slide: ask what the materials say. If the retrieved chunk has a limitation note, the answer should stay honest. If the topic just isn’t in the text, it shouldn’t invent chart data (rule 7 in `src/rag.py`).
 
-## 3. Version-aware question (~2 min)
+**6 — Audit (~1 min)**  
+Expand **Retrieved context** and show the actual chunks and scores — that’s the grounding story.
 
-Example:
+**7 — Optional (~1 min)**  
+Switch **Client / workspace** between two values and ingest — scoped listing is clearer on Postgres; SQLite still filters in the app.
 
-- *“How has [metric or strategy] changed across document versions for [Company X]?”*
-
-**Highlight:** attributions to **version labels** and citations **document + page**.
-
-## 4. Cross-document / conflicts (~2 min)
-
-Example:
-
-- *“Are there conflicting data points across these materials on [topic]?”*
-
-**Highlight:** model should **not** merge conflicting facts; **Conflicts** section + **Sources**.
-
-## 5. Charts / tables (~1 min)
-
-Pick a chart-heavy slide if available:
-
-- *“What does the material say about [topic] on that slide?”*
-
-**Highlight:** if context includes a **chart extraction** note, the answer stays honest; if the topic is simply missing, it should **not** blame charts unless that note appears (see `src/rag.py` rule 7).
-
-## 6. Audit trail (~1 min)
-
-- Expand **Retrieved context** — show **chunks**, scores, metadata.
-
-## 7. Optional: client scope (~1 min)
-
-- **Client / workspace** `client-a` → ingest; switch to `client-b` → ingest — show scoped listing (Postgres filters in DB; SQLite filters in app).
-
----
-
-## Example questions (from the brief)
+Example prompts from the brief (copy-paste friendly):
 
 - What is [Company X]’s key strategy?
 - How has [metric] changed across document versions?

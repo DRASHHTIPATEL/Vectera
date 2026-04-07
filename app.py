@@ -24,7 +24,8 @@ st.set_page_config(page_title="Vectera — Investment Doc RAG", layout="wide")
 ensure_dirs()
 
 st.title("Vectera")
-st.caption("RAG over investment PDFs — source-grounded answers, version-aware, conflict-safe.")
+st.caption("Ask questions over your PDFs — answers use retrieved text only, with sources. "
+           "Set company + version when you upload so multi-version decks stay comparable.")
 
 with st.sidebar:
     st.header("Ingest documents")
@@ -64,7 +65,8 @@ with st.sidebar:
     if DATABASE_URL:
         st.caption("Connected via `DATABASE_URL` (Postgres + pgvector).")
     else:
-        st.caption("No `DATABASE_URL`: using local **SQLite** + **FAISS** (fine for quick demos; set Postgres for the assessment path).")
+        st.caption("Running without **DATABASE_URL** — **SQLite** + **FAISS** on disk. "
+                   "That’s normal for local dev; use Postgres + `DATABASE_URL` when you want the full DB path.")
 
     st.divider()
     st.subheader("Indexed documents")
@@ -100,7 +102,7 @@ if ask and q.strip():
 
     st.markdown(ans)
 
-    with st.expander("Retrieved context (for audit)"):
+    with st.expander("Retrieved context — what the model actually saw"):
         for c in chunks:
             st.markdown(
                 f"**{c['document_name']}** · page {c['page_number']} · "

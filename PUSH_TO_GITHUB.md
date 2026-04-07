@@ -1,6 +1,8 @@
-# Push this repo to GitHub (I can’t log in as you — run these locally)
+# Pushing to GitHub
 
-## Option A — GitHub CLI (`gh`)
+I can’t authenticate as you, so this has to run on your machine.
+
+**Using GitHub CLI** (if you use `gh`):
 
 ```bash
 cd /Users/drashtipatel/Desktop/Vectera
@@ -8,10 +10,7 @@ gh auth login
 gh repo create YOUR-REPO-NAME --private --source=. --remote=origin --push
 ```
 
-## Option B — Web UI
-
-1. Create a **new empty repository** on GitHub (no README).
-2. Then:
+**Using the website** — create an empty repo (no README), then:
 
 ```bash
 cd /Users/drashtipatel/Desktop/Vectera
@@ -20,14 +19,10 @@ git branch -M main
 git push -u origin main
 ```
 
-`.env` stays **local** (gitignored). Reviewers clone and run `cp .env.example .env`.
+`.env` is gitignored so secrets stay local. Anyone cloning should run `cp .env.example .env` and fill in LLM + optional DB.
 
-## Postgres on your machine
+---
 
-**Docker was not available** in the automated setup environment. To use the assessment Postgres path:
+**Postgres note:** install Docker Desktop if you want `docker compose up -d` and set `DATABASE_URL` in `.env`.
 
-1. Install **Docker Desktop** for Mac.
-2. `docker compose up -d`
-3. Uncomment `DATABASE_URL` in `.env`, restart Streamlit, **re-index** your PDFs.
-
-Until then, the app uses **SQLite + FAISS** under `data/` (valid for local demos).
+Until then, SQLite + FAISS under `data/` is fine for demos — just say that in the video if asked.
