@@ -1,36 +1,25 @@
-# Demo (about 5–10 minutes)
+Hi, I’ll quickly walk through the system I built for this assignment.
 
-Here’s how I’d walk someone through this — recorded or live.
+The goal here was to build something that can handle real-world investment documents, not just answer questions, but make sure the outputs are grounded, traceable, and reliable.
 
-Before you hit record: pick your LLM path (**Ollama** with `USE_OLLAMA=1`, or a cloud key with `USE_OLLAMA=0`). If you have Docker, `docker compose up -d` + `DATABASE_URL` in `.env` is a nice story for Postgres; if not, just say you’re on **SQLite + FAISS** locally — that’s honest and the app supports it.
+So this is the interface. I’ve already uploaded a set of PDFs, and I can query across all of them.
 
-**1 — Setup (~1 min)**  
-Open the README, scroll to the mermaid diagram, explain in one sentence: PDFs → chunks → embeddings → DB → retrieve → LLM. Start the app (`streamlit run app.py` or `./scripts/run.sh`). Point at the sidebar: **Client**, **Company**, **Version** — the version field matters for “compare across versions” questions.
+Let me start with a simple question. I’ll ask, what is the strategy of Digital Realty.
 
-**2 — Ingest (~2 min)**  
-Upload two PDFs for the **same company** with **different version labels** (e.g. `2023-deck` vs `2024-deck`). Add another PDF from a **different company** or a third-party report so retrieval isn’t one document only. Check the indexed list in the sidebar.
+You can see the system retrieves relevant sections and generates an answer. What I focused on here is making sure the response is tied back to the source, so every part of the answer includes citations with the document name and page number. That way, it is not just generating text, but actually pointing to where the information is coming from.
 
-**3 — Version question (~2 min)**  
-Ask something like: *“How has [metric or strategy] changed across document versions for [Company X]?”*  
-Call out that answers should tie back to **version labels** and **document + page** in Sources.
+Now I’ll try something across documents. I’ll ask, compare EastGroup and Digital Realty.
 
-**4 — Conflicts (~2 min)**  
-Ask: *“Are there conflicting data points across these materials on [topic]?”*  
-Emphasize you’re **not** looking for the model to average two numbers — Conflicts section + separate attributions.
+Here, the system pulls context from multiple documents and gives a comparison. For example, EastGroup is focused more on physical logistics infrastructure, while Digital Realty is focused on data centers and AI driven demand. So instead of treating each document in isolation, it is able to reason across them.
 
-**5 — Charts / tables (~1 min)**  
-If you have a chart-heavy slide: ask what the materials say. If the retrieved chunk has a limitation note, the answer should stay honest. If the topic just isn’t in the text, it shouldn’t invent chart data (rule 7 in `src/rag.py`).
+One thing I was particularly careful about is handling conflicting information. Let me ask, are there conflicting data points across documents.
 
-**6 — Audit (~1 min)**  
-Expand **Retrieved context** and show the actual chunks and scores — that’s the grounding story.
+If there are differences, the system does not try to merge or resolve them automatically. Instead, it surfaces both and attributes them clearly. I felt that was important because in this kind of use case, it is better to expose differences than to risk introducing incorrect assumptions.
 
-**7 — Optional (~1 min)**  
-Switch **Client / workspace** between two values and ingest — scoped listing is clearer on Postgres; SQLite still filters in the app.
+Under the hood, the system is a straightforward pipeline with document ingestion, chunking, embeddings, retrieval, and then generation based strictly on the retrieved context. I tried to keep the design simple, but focused on making it reliable.
 
-Example prompts from the brief (copy-paste friendly):
+There are a few limitations. Charts and visual heavy pages are not fully extracted, so in those cases the system treats them as text where possible. Also, conflict resolution is not automated, it is surfaced instead. With more time, I would improve structured data extraction and retrieval quality further.
 
-- What is [Company X]’s key strategy?
-- How has [metric] changed across document versions?
-- What drives demand according to these materials?
-- Are there conflicting data points across documents?
-- Summarize key trends shown in the documents
+Overall, the idea was to build something that behaves more like a decision support system than a chatbot, where the emphasis is on grounding and traceability.
+
+Happy to walk through any part in more detail.
