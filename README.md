@@ -203,7 +203,7 @@ The take-home asked for Python; a **database layer** (Snowflake preferred or Pos
 - Are there conflicting data points across documents?
 - Summarize key trends shown in the documents
 
-**Deliverables:** query UI (`app.py`), offline indexer (`ingest.py`), this README, setup via `.env.example`, demo script in `DEMO.md`, submission notes in `SUBMISSION.md`, push help in `PUSH_TO_GITHUB.md` (you still need to push with your own GitHub account).
+**Deliverables:** query UI (`app.py`), offline indexer (`ingest.py`), this README, setup via `.env.example`, submission notes in `SUBMISSION.md`, push help in `PUSH_TO_GITHUB.md` (you still need to push with your own GitHub account).
 
 ---
 
@@ -229,7 +229,6 @@ app.py                 # Streamlit query UI (no document ingestion)
 docker-compose.yml     # Postgres + pgvector
 scripts/run.sh         # helper launcher
 scripts/pgvector_hnsw.sql  # optional HNSW index for Postgres at scale
-DEMO.md                # demo script
 SUBMISSION.md          # handoff checklist
 src/
   config.py
