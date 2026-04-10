@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from openai import OpenAI
+from openai import APIConnectionError, APITimeoutError, OpenAI
 
-from src.config import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
+from src.config import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, USE_OLLAMA
 
 
 SYSTEM_PROMPT = """You are an analyst assistant for investment documents.
@@ -17,6 +17,7 @@ Rules (must follow all):
 5) Every factual claim in your answer must be traceable to a source line below. Use inline citations like [DocumentName p.Page].
 6) If context mentions that chart/table data could not be fully extracted, reflect that honestly; do not guess chart values.
 7) Do NOT blame "chart extraction" or "image-heavy pages" unless that exact limitation appears in the CONTEXT for the relevant excerpt. If the topic is simply missing from the documents, say the documents do not address it.
+8) In **Sources**, every line MUST look like a human citation: `- Filename.pdf (Page N) [Version: label]`. Do NOT echo CONTEXT headers or use `document=…|page=…|company=…` key-value style.
 
 Output format (exact headings):
 
@@ -31,7 +32,8 @@ Conflicts (if any):
 - <bullet, or "None apparent from the provided context.">
 
 Sources:
-- <Document name> (Page <n>) [Version: <version> if applicable]
+- <document_filename.pdf> (Page <n>) [Version: <version>]
+- (repeat per source; same format only)
 """
 
 
@@ -81,13 +83,44 @@ def answer_question(question: str, chunks: list[dict]) -> str:
 
     client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
     # Ollama ignores the key but the client requires a non-empty string.
-    resp = client.chat.completions.create(
-        model=OPENAI_MODEL,
-        temperature=0.1,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_msg},
-        ],
-    )
+    try:
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            temperature=0.1,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_msg},
+            ],
+        )
+    except (APIConnectionError, APITimeoutError) as e:
+        endpoint = OPENAI_BASE_URL or "https://api.openai.com/v1"
+        hint = (
+            "**Local Ollama:** open the Ollama app or run `ollama serve`, then `ollama pull "
+            f"{OPENAI_MODEL}` if needed. `.env` should have `USE_OLLAMA=1`.\n\n"
+            "**Cloud API:** set `USE_OLLAMA=0`, `OPENAI_API_KEY=...`, and "
+            "`OPENAI_BASE_URL=https://api.openai.com/v1` (or your provider)."
+        )
+        if not USE_OLLAMA:
+            hint = (
+                "**Cloud:** check `OPENAI_API_KEY`, network/VPN, and `OPENAI_BASE_URL`. "
+                "For OpenAI use `https://api.openai.com/v1`.\n\n"
+                "**Local:** set `USE_OLLAMA=1`, start Ollama, and use "
+                "`OPENAI_BASE_URL=http://127.0.0.1:11434/v1`."
+            )
+        return (
+            "Answer:\n"
+            f"Could not reach the language model (`{endpoint}`, model `{OPENAI_MODEL}`): "
+            f"{type(e).__name__}.\n\n"
+            f"{hint}\n\n"
+            "Key Points:\n"
+            "- Retrieval ran; only the chat step failed.\n\n"
+            "Conflicts (if any):\n"
+            "- N/A\n\n"
+            "Sources:\n"
+            + "\n".join(
+                f"- {c['document_name']} (Page {c['page_number']}) [Version: {c['version']}]"
+                for c in chunks
+            )
+        )
     text = (resp.choices[0].message.content or "").strip()
     return text

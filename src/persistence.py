@@ -53,8 +53,8 @@ def insert_chunks_after_embed(
     db.insert_chunks(document_id, rows, start_faiss_index)
 
 
-def next_vector_key_cursor() -> int:
-    """SQLite: next FAISS slot. Postgres: unused (returns 0)."""
+def next_vector_key() -> int:
+    """SQLite: next FAISS slot index. Postgres: unused (returns 0)."""
     if use_postgres():
         return 0
     from src import database as db

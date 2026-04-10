@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Start Ollama (if not running), then Streamlit. From repo root: ./scripts/run.sh
+# Index PDFs first (separate step): python ingest.py ./path/to/pdfs
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"

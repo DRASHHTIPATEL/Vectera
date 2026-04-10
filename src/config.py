@@ -24,10 +24,17 @@ FAISS_PATH = DATA_DIR / "faiss.index"
 FAISS_META_PATH = DATA_DIR / "faiss_meta.json"
 
 # --- LLM (OpenAI-compatible API: OpenAI, Groq, Together, local Ollama, etc.) ---
-USE_OLLAMA = os.getenv("USE_OLLAMA", "").lower() in ("1", "true", "yes")
+# Free default: use local Ollama when USE_OLLAMA is unset and no cloud API key is set.
+_use_flag = os.getenv("USE_OLLAMA", "").strip().lower()
+OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
+if _use_flag in ("1", "true", "yes"):
+    USE_OLLAMA = True
+elif _use_flag in ("0", "false", "no"):
+    USE_OLLAMA = False
+else:
+    USE_OLLAMA = not bool(OPENAI_API_KEY)
 
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL") or None
-OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
 _model_env = (os.getenv("OPENAI_MODEL") or "").strip()
 
 if USE_OLLAMA:

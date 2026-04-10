@@ -9,13 +9,27 @@ from src.chunking import pages_to_chunks
 from src.config import UPLOADS_DIR, ensure_dirs, use_postgres
 from src.embeddings import embed_texts
 from src.ingestion import extract_pdf_pages, save_upload
-from src.persistence import add_document, insert_chunks_after_embed, next_vector_key_cursor
+from src.persistence import add_document, insert_chunks_after_embed, next_vector_key
 
 
 def _safe_filename(name: str) -> str:
     base = Path(name).name
     base = re.sub(r"[^a-zA-Z0-9._-]+", "_", base)
     return base[:200] if len(base) > 200 else base
+
+
+def ingest_pdf_path(
+    pdf_path: Path,
+    company_name: str,
+    version: str,
+    client_label: str = "default",
+) -> dict:
+    """
+    Ingest a PDF from disk (offline batch). Same pipeline as ingest_pdf(); copies into UPLOADS_DIR.
+    """
+    pdf_path = pdf_path.resolve()
+    file_bytes = pdf_path.read_bytes()
+    return ingest_pdf(file_bytes, pdf_path.name, company_name, version, client_label)
 
 
 def ingest_pdf(
@@ -48,7 +62,7 @@ def ingest_pdf(
             "message": "No text chunks produced (empty or unscanned PDF).",
         }
 
-    start_idx = next_vector_key_cursor()
+    start_idx = next_vector_key()
     texts = [c["chunk_text"] for c in chunks]
     vectors = embed_texts(texts)
 
