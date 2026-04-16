@@ -2,6 +2,9 @@
 streamlit>=1.28.0
 pypdf>=4.0.0
 pdfplumber>=0.11.0
+# Chart/figure OCR (Part 2): also install the Tesseract engine (e.g. brew install tesseract on macOS).
+Pillow>=10.0.0
+pytesseract>=0.3.10
 sqlalchemy>=2.0.0
 faiss-cpu>=1.7.4
 numpy>=1.24.0

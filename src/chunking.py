@@ -17,8 +17,23 @@ class ChunkPayload(TypedDict, total=False):
     page_number: int
     company_name: str
     version: str
+    document_year: int | None
+    document_month: int | None
     chunk_text: str
     chart_note: str | None
+    is_structured: bool
+    structured_type: str | None
+    source_type: str
+    ocr_low_confidence: bool
+
+
+def _infer_source_type(chunk_text: str, page_structured: str | None, ocr_low: bool) -> str:
+    ct = chunk_text or ""
+    if "[OCR_EXTRACTED]" in ct or "[CHART_OR_FIGURE_OCR]" in ct or ocr_low:
+        return "ocr"
+    if "[STRUCTURED_TABLE]" in ct:
+        return "table"
+    return "text"
 
 
 def _split_into_units(text: str) -> list[str]:
@@ -101,18 +116,27 @@ def page_to_chunks(
     document_name: str,
     company_name: str,
     version: str,
+    document_year: int | None = None,
+    document_month: int | None = None,
 ) -> list[ChunkPayload]:
     raw = page.text.strip()
     if not raw:
         if page.chart_warning:
+            st = _infer_source_type("", page.structured_type, page.ocr_low_confidence)
             return [
                 {
                     "document_name": document_name,
                     "page_number": page.page_number,
                     "company_name": company_name,
                     "version": version,
+                    "document_year": document_year,
+                    "document_month": document_month,
                     "chunk_text": f"[Page {page.page_number} — no extractable text] {page.chart_warning}",
                     "chart_note": page.chart_warning,
+                    "is_structured": bool(page.structured_type),
+                    "structured_type": page.structured_type,
+                    "source_type": st,
+                    "ocr_low_confidence": page.ocr_low_confidence,
                 }
             ]
         return []
@@ -126,14 +150,27 @@ def page_to_chunks(
     out: list[ChunkPayload] = []
     for i, ct in enumerate(final_chunks):
         note = chart_note if i == 0 else None
+        stype = _infer_source_type(ct, page.structured_type, page.ocr_low_confidence)
+        has_struct = (
+            bool(page.structured_type)
+            or "[STRUCTURED_TABLE]" in ct
+            or "[OCR_EXTRACTED]" in ct
+            or "[CHART_OR_FIGURE_OCR]" in ct
+        )
         out.append(
             {
                 "document_name": document_name,
                 "page_number": page.page_number,
                 "company_name": company_name,
                 "version": version,
+                "document_year": document_year,
+                "document_month": document_month,
                 "chunk_text": ct,
                 "chart_note": note,
+                "is_structured": has_struct,
+                "structured_type": page.structured_type,
+                "source_type": stype,
+                "ocr_low_confidence": page.ocr_low_confidence,
             }
         )
     return out
@@ -144,8 +181,19 @@ def pages_to_chunks(
     document_name: str,
     company_name: str,
     version: str,
+    document_year: int | None = None,
+    document_month: int | None = None,
 ) -> list[ChunkPayload]:
     all_chunks: list[ChunkPayload] = []
     for p in pages:
-        all_chunks.extend(page_to_chunks(p, document_name, company_name, version))
+        all_chunks.extend(
+            page_to_chunks(
+                p,
+                document_name,
+                company_name,
+                version,
+                document_year=document_year,
+                document_month=document_month,
+            )
+        )
     return all_chunks

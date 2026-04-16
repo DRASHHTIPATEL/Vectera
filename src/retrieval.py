@@ -5,6 +5,7 @@ Retrieve top similar chunks, then diversify so answers are not dominated by one 
 from __future__ import annotations
 
 from collections import defaultdict
+import re
 
 from src.config import (
     MAX_CHUNKS_PER_DOCUMENT_IN_BATCH,
@@ -13,7 +14,174 @@ from src.config import (
     RETRIEVAL_FINAL_MIN,
 )
 from src.embeddings import embed_texts
-from src.persistence import get_chunks_by_keys, vector_similarity_search
+from src.metrics_heuristic import format_metric_chunk_row
+from src.persistence import get_chunks_by_keys, match_metrics_for_query, vector_similarity_search
+
+RECENCY_BOOST_MAX = 0.022
+SYNTH_CONF_SCORE = {"high": 0.9935, "medium": 0.9925, "low": 0.991}
+
+TREND_HINTS = (
+    "trend",
+    "over time",
+    "changed",
+    "change",
+    "historical",
+    "across versions",
+    "year over year",
+    "yoy",
+    "timeline",
+)
+
+MONTH_LOOKUP = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
+
+
+def _extract_query_date(query: str) -> tuple[int | None, int | None]:
+    q = query.lower()
+    m = re.search(
+        r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|"
+        r"sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(20\d{2})\b",
+        q,
+    )
+    if m:
+        month = MONTH_LOOKUP.get(m.group(1), MONTH_LOOKUP.get(m.group(1)[:3]))
+        return int(m.group(2)), month
+    y = re.search(r"\b(20\d{2})\b", q)
+    if y:
+        return int(y.group(1)), None
+    return None, None
+
+
+def _is_trend_query(query: str) -> bool:
+    q = query.lower()
+    return any(k in q for k in TREND_HINTS)
+
+
+def classify_query_intent(query: str) -> dict[str, bool]:
+    """Rule-based intent for retrieval (no ML)."""
+    ql = query.lower()
+    ty, _ = _extract_query_date(query)
+    trend = _is_trend_query(query)
+    comparison = any(
+        p in ql
+        for p in (
+            "compare",
+            "comparison",
+            " vs ",
+            " versus ",
+            "compared to",
+            "compared with",
+            " vs. ",
+        )
+    )
+    latest_intent = (
+        any(p in ql for p in ("latest", "most recent", "newest", "current"))
+        and ty is None
+        and not trend
+    )
+    return {
+        "temporal_strict": ty is not None,
+        "trend": trend,
+        "comparison": comparison,
+        "latest_intent": latest_intent,
+        "direct_metric": _is_numeric_or_metric_query(query),
+    }
+
+
+def _is_numeric_or_metric_query(query: str) -> bool:
+    q = query.lower()
+    keys = (
+        "occupancy",
+        "revenue",
+        "sales",
+        "rent",
+        "ffo",
+        "noi",
+        "affo",
+        "npi",
+        "growth",
+        "yoy",
+        "margin",
+        "ebitda",
+        "cap rate",
+        "how much",
+        "what is",
+        "what was",
+        "what were",
+        "percentage",
+    )
+    if any(k in q for k in keys):
+        return True
+    if re.search(r"\b\d{1,3}(?:\.\d+)?\s*%|\$[\d,]+|million|billion|\bbps\b", q):
+        return True
+    return False
+
+
+def _synthetic_metric_chunks(rows: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for i, row in enumerate(rows):
+        conf = row.get("confidence") or "medium"
+        low_ocr = conf == "low" or row.get("source_type") == "ocr"
+        disp = row.get("original_value") or row.get("value")
+        out.append(
+            {
+                "document_name": row["document_name"],
+                "page_number": row["page_number"],
+                "company_name": row["company_name"],
+                "version": row["version"],
+                "document_year": row.get("document_year"),
+                "document_month": row.get("document_month"),
+                "chunk_text": format_metric_chunk_row(row),
+                "chart_note": None,
+                "is_structured": True,
+                "structured_type": "metric",
+                "source_type": row.get("source_type") or "text",
+                "ocr_low_confidence": bool(low_ocr),
+                "faiss_index": -1 - i,
+                "from_stored_metrics": True,
+                "confidence": conf,
+                "score": float(SYNTH_CONF_SCORE.get(conf, 0.9925)),
+                "metric_display_name": row.get("metric_name"),
+                "metric_display_value": disp,
+                "normalized_value": row.get("normalized_value"),
+            }
+        )
+    return out
+
+
+def _matches_company_hint(query: str, company_name: str) -> bool:
+    q = query.lower()
+    cn = company_name.lower().strip()
+    if not cn:
+        return False
+    if cn in q:
+        return True
+    tokens = [t for t in re.split(r"\W+", cn) if len(t) > 2]
+    return any(t in q for t in tokens[:2])
 
 
 def diversified_retrieve(
@@ -38,6 +206,39 @@ def diversified_retrieve(
 
     chunk_keys = [int(k) for _, k in order]
     by_key = get_chunks_by_keys(chunk_keys)
+    if not by_key:
+        return []
+
+    intent = classify_query_intent(query)
+    query_year, query_month = _extract_query_date(query)
+    trend_mode = intent["trend"]
+    company_hinted = {m["company_name"] for m in by_key.values() if _matches_company_hint(query, m["company_name"])}
+
+    max_recency_units = 1
+    for m in by_key.values():
+        max_recency_units = max(
+            max_recency_units,
+            (m.get("document_year") or 0) * 12 + (m.get("document_month") or 0),
+        )
+
+    def _recency_boost(meta: dict) -> float:
+        u = (meta.get("document_year") or 0) * 12 + (meta.get("document_month") or 0)
+        return RECENCY_BOOST_MAX * (float(u) / float(max_recency_units))
+
+    struct_boost = 0.04 if intent["comparison"] else 0.03
+
+    target_versions_by_company: dict[str, tuple[int | None, int | None]] = {}
+    if not trend_mode:
+        company_dates: dict[str, list[tuple[int | None, int | None]]] = defaultdict(list)
+        for m in by_key.values():
+            if company_hinted and m["company_name"] not in company_hinted:
+                continue
+            company_dates[m["company_name"]].append((m.get("document_year"), m.get("document_month")))
+        for co, pairs in company_dates.items():
+            valid = [(y or 0, mo or 0) for y, mo in pairs]
+            if valid:
+                best = max(valid)
+                target_versions_by_company[co] = (best[0] or None, best[1] or None)
 
     per_doc: dict[str, int] = defaultdict(int)
     selected: list[tuple[float, int]] = []
@@ -47,9 +248,27 @@ def diversified_retrieve(
         meta = by_key.get(ck)
         if meta is None:
             continue
+        if company_hinted and meta["company_name"] not in company_hinted:
+            continue
+        if query_year is not None:
+            if meta.get("document_year") != query_year:
+                continue
+            if query_month is not None and meta.get("document_month") != query_month:
+                continue
+        elif not trend_mode:
+            target = target_versions_by_company.get(meta["company_name"])
+            if target:
+                ty, tm = target
+                if meta.get("document_year") != ty:
+                    continue
+                if tm and meta.get("document_month") not in (tm, None):
+                    continue
         doc_key = meta["document_name"]
         if per_doc[doc_key] >= MAX_CHUNKS_PER_DOCUMENT_IN_BATCH:
             continue
+        score = float(score) + _recency_boost(meta)
+        if meta.get("is_structured"):
+            score = score + struct_boost
         selected.append((score, ck))
         per_doc[doc_key] += 1
         if len(selected) >= k_final:
@@ -63,11 +282,29 @@ def diversified_retrieve(
             meta = by_key.get(ck)
             if meta is None:
                 continue
+            if company_hinted and meta["company_name"] not in company_hinted:
+                continue
+            if query_year is not None:
+                if meta.get("document_year") != query_year:
+                    continue
+                if query_month is not None and meta.get("document_month") != query_month:
+                    continue
+            elif not trend_mode:
+                target = target_versions_by_company.get(meta["company_name"])
+                if target:
+                    ty, tm = target
+                    if meta.get("document_year") != ty:
+                        continue
+                    if tm and meta.get("document_month") not in (tm, None):
+                        continue
+            score = float(score) + _recency_boost(meta)
+            if meta.get("is_structured"):
+                score = score + struct_boost
             selected.append((score, ck))
             if len(selected) >= RETRIEVAL_FINAL_MIN:
                 break
 
-    if len(selected) >= 4:
+    if len(selected) >= 4 and trend_mode:
         metas = [by_key[s[1]] for s in selected if s[1] in by_key]
         companies = {m["company_name"] for m in metas}
         if len(companies) == 1:
@@ -94,4 +331,13 @@ def diversified_retrieve(
         row = dict(m)
         row["score"] = float(score)
         results.append(row)
+
+    if _is_numeric_or_metric_query(query) or intent["comparison"]:
+        cl = client_label if (client_label and str(client_label).strip()) else None
+        mlim = min(8 if intent["comparison"] else 6, k_final)
+        mrows = match_metrics_for_query(query, cl, limit=mlim)
+        synth = _synthetic_metric_chunks(mrows)
+        take_vec = max(0, k_final - len(synth))
+        results = synth + results[:take_vec]
+
     return results

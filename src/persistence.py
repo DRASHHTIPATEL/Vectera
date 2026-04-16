@@ -19,17 +19,33 @@ def add_document(
     version: str,
     page_count: int,
     client_label: str = "default",
+    document_year: int | None = None,
+    document_month: int | None = None,
 ) -> int:
     if use_postgres():
         from src import postgres_db as db
 
         return db.add_document(
-            stored_path, document_name, company_name, version, page_count, client_label
+            stored_path,
+            document_name,
+            company_name,
+            version,
+            page_count,
+            client_label,
+            document_year=document_year,
+            document_month=document_month,
         )
     from src import database as db
 
     return db.add_document(
-        stored_path, document_name, company_name, version, page_count, client_label
+        stored_path,
+        document_name,
+        company_name,
+        version,
+        page_count,
+        client_label,
+        document_year=document_year,
+        document_month=document_month,
     )
 
 
@@ -120,5 +136,46 @@ def list_documents(client_label: str | None = None) -> list[dict[str, Any]]:
     return db.list_documents(client_label=client_label)
 
 
+def has_document_version(document_name: str, version: str, client_label: str | None = None) -> bool:
+    if use_postgres():
+        from src import postgres_db as db
+
+        return db.has_document_version(document_name, version, client_label=client_label)
+    from src import database as db
+
+    return db.has_document_version(document_name, version, client_label=client_label)
+
+
 def backend_name() -> str:
     return "postgres+pgvector" if use_postgres() else "sqlite+faiss"
+
+
+def insert_extracted_metrics(document_id: int, document_name: str, rows: list[dict[str, Any]]) -> None:
+    if use_postgres():
+        from src import postgres_db as db
+
+        db.insert_extracted_metrics(document_id, document_name, rows)
+        return
+    from src import database as db
+
+    db.insert_extracted_metrics(document_id, document_name, rows)
+
+
+def match_metrics_for_query(query: str, client_label: str | None, limit: int = 12) -> list[dict[str, Any]]:
+    if use_postgres():
+        from src import postgres_db as db
+
+        return db.match_metrics_for_query(query, client_label, limit=limit)
+    from src import database as db
+
+    return db.match_metrics_for_query(query, client_label, limit=limit)
+
+
+def list_metrics_for_client(client_label: str | None, limit: int = 500) -> list[dict[str, Any]]:
+    if use_postgres():
+        from src import postgres_db as db
+
+        return db.list_metrics_for_client(client_label, limit=limit)
+    from src import database as db
+
+    return db.list_metrics_for_client(client_label, limit=limit)

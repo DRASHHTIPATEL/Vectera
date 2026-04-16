@@ -44,6 +44,18 @@ def _format_context(chunks: list[dict]) -> str:
             f"[{i}] document={c['document_name']} | page={c['page_number']} | "
             f"company={c['company_name']} | version={c['version']}"
         )
+        tags: list[str] = []
+        if c.get("from_stored_metrics"):
+            tags.append("structured_metric_store")
+        st = c.get("source_type")
+        if st:
+            tags.append(f"source_type={st}")
+        if c.get("confidence"):
+            tags.append(f"confidence={c['confidence']}")
+        if c.get("ocr_low_confidence"):
+            tags.append("ocr_or_low_confidence_extract")
+        if tags:
+            header += " | " + " ".join(tags)
         body = c["chunk_text"].strip()
         if c.get("chart_note"):
             body += f"\n(Note: {c['chart_note']})"

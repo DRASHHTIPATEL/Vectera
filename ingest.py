@@ -42,9 +42,13 @@ def main() -> None:
     parser.add_argument(
         "--company",
         default=None,
-        help="Company name for all PDFs in this run. If omitted, each file uses its filename stem.",
+        help="Optional override for company_name on all PDFs in this run. If omitted, inferred from filename.",
     )
-    parser.add_argument("--version", default="v1", help='Version label stored on every chunk (default: v1).')
+    parser.add_argument(
+        "--version",
+        default=None,
+        help="Optional override for version label on all PDFs. If omitted, inferred from filename.",
+    )
     parser.add_argument("--client", default="default", help="Client / workspace label (default: default).")
     parser.add_argument(
         "--recursive",
@@ -64,11 +68,11 @@ def main() -> None:
     print(f"Found {len(pdfs)} PDF(s).")
 
     cl = (args.client or "default").strip() or "default"
-    ver = (args.version or "v1").strip() or "v1"
+    ver = (args.version or "").strip() or None
 
     ok = 0
     for p in pdfs:
-        company = (args.company or p.stem).strip() or "Unknown"
+        company = (args.company or "").strip() or None
         print(f"  → {p.name} (company={company!r}, version={ver!r}, client={cl!r})")
         try:
             result = ingest_pdf_path(p, company, ver, client_label=cl)
