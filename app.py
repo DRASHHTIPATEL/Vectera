@@ -145,6 +145,90 @@ def _ocr_scan_numbers_for_bar_chart(text: str) -> dict[str, float]:
     return out
 
 
+def _chart_series_from_text(text: str) -> dict[str, float]:
+    """Parse explicit series if present, e.g. [CHART_OCR_SERIES] US=17.7%; EGP=24.2%."""
+    sm = re.search(r"\[CHART_OCR_SERIES\]\s*([^\n]+)", text)
+    if not sm:
+        return {}
+    out: dict[str, float] = {}
+    for item in [p.strip() for p in sm.group(1).split(";") if p.strip()]:
+        mm = re.match(r"([A-Za-z0-9 _-]{1,24})\s*=\s*([\d.]+)\s*%?", item)
+        if not mm:
+            continue
+        try:
+            out[mm.group(1).strip()] = float(mm.group(2))
+        except ValueError:
+            continue
+    return out
+
+
+def _answer_series_for_visualization(chunks: list[dict], question: str) -> dict[str, float]:
+    """
+    Return a trusted series for answer-level visualization.
+    Gate strictly on explicit OCR series values from retrieved chunks.
+    """
+    ql = (question or "").lower()
+    prefer_us_egp = "us" in re.sub(r"[^a-z0-9]+", "", ql) and "egp" in ql
+
+    candidates: list[dict[str, float]] = []
+    for c in chunks:
+        s = _chart_series_from_text(str(c.get("chunk_text") or ""))
+        if len(s) >= 2:
+            candidates.append(s)
+    if not candidates:
+        return {}
+
+    if prefer_us_egp:
+        for s in candidates:
+            keys = {k.lower() for k in s.keys()}
+            if "us" in keys and "egp" in keys:
+                return {"US": float(s[[k for k in s if k.lower() == "us"][0]]), "EGP": float(s[[k for k in s if k.lower() == "egp"][0]])}
+
+    # Fallback: first explicit series with 2+ points.
+    first = candidates[0]
+    return {k: float(v) for k, v in list(first.items())[:6]}
+
+
+def _looks_like_visual_request(question: str) -> bool:
+    q = (question or "").lower()
+    return any(k in q for k in ("visualize", "plot", "chart", "graph", "display"))
+
+
+def _series_from_metric_hits_for_query(question: str, metric_hits: list[dict]) -> dict[str, float]:
+    """
+    Build a labeled numeric series from retrieved metric rows for answer-level charting.
+    Used when no explicit CHART_OCR_SERIES is available.
+    """
+    if not metric_hits:
+        return {}
+
+    ql = (question or "").lower()
+    want_occupancy = "occupancy" in ql
+    rows = metric_hits
+    if want_occupancy:
+        rows = [r for r in metric_hits if "occupancy" in str(r.get("metric_name", "")).lower()] or metric_hits
+
+    out: dict[str, float] = {}
+    for r in rows:
+        v = r.get("normalized_value")
+        if v is None:
+            v = _pct_or_float(str(r.get("value", "")))
+        if v is None:
+            continue
+        company = str(r.get("company_name") or "Unknown")
+        ver = str(r.get("version") or "unknown")
+        metric = str(r.get("metric_name") or "metric")
+        label = f"{company} · {ver} · {metric}"
+        if len(label) > 52:
+            label = label[:49] + "…"
+        # Keep first occurrence per label to avoid noisy duplicates.
+        if label not in out:
+            out[label] = float(v)
+        if len(out) >= 12:
+            break
+    return out
+
+
 def _group_chart_chunks(chunks: list[dict]) -> "OrderedDict[tuple[str, int], list[dict]]":
     groups: OrderedDict[tuple[str, int], list[dict]] = OrderedDict()
     for c in chunks:
@@ -233,10 +317,54 @@ def _chart_answer_chunks(query: str, chart_chunks: list[dict], fallback_chunks: 
     """
     if not chart_chunks:
         return fallback_chunks
-    scored = sorted((( _chart_match_score(query, c), c) for c in chart_chunks), key=lambda x: x[0], reverse=True)
-    explicit = [c for s, c in scored if "[CHART_OCR_SERIES]" in (c.get("chunk_text") or "")]
+    scored = sorted(((_chart_match_score(query, c), c) for c in chart_chunks), key=lambda x: x[0], reverse=True)
+
+    ql = (query or "").lower()
+    q_flat = re.sub(r"[^a-z0-9]+", "", ql)
+    needs_us_egp = ("us" in q_flat) and ("egp" in q_flat)
+
+    def _blob(c: dict) -> str:
+        return " ".join(
+            [
+                str(c.get("chunk_text") or "").lower(),
+                str(c.get("document_name") or "").lower(),
+                str(c.get("company_name") or "").lower(),
+                str(c.get("version") or "").lower(),
+            ]
+        )
+
+    def _series_labels(c: dict) -> set[str]:
+        txt = c.get("chunk_text") or ""
+        m = re.search(r"\[CHART_OCR_SERIES\]\s*([^\n]+)", txt, flags=re.I)
+        if not m:
+            return set()
+        labels: set[str] = set()
+        for part in [p.strip() for p in m.group(1).split(";") if p.strip()]:
+            mm = re.match(r"([A-Za-z0-9 _-]{1,24})\s*=", part)
+            if mm:
+                labels.add(mm.group(1).strip().lower())
+        return labels
+
+    explicit = []
+    for s, c in scored:
+        if "[CHART_OCR_SERIES]" not in (c.get("chunk_text") or ""):
+            continue
+        labels = _series_labels(c)
+        if needs_us_egp and not ({"us", "egp"} <= labels):
+            continue
+        explicit.append(c)
     if explicit:
-        return explicit[:2]
+        return explicit[:1] if needs_us_egp else explicit[:2]
+    if needs_us_egp:
+        # Keep only chunks that actually mention both labels.
+        focused = [
+            c
+            for _, c in scored
+            if re.search(r"\b(?:u\.?s\.?|us)\b", _blob(c), flags=re.I)
+            and re.search(r"\begp\b", _blob(c), flags=re.I)
+        ]
+        if focused:
+            return focused[:1]
     best = [c for s, c in scored if s > 0.35]
     if best:
         return best[:3]
@@ -434,6 +562,15 @@ if ask and q.strip():
         "should be verified against the source PDF."
     )
     st.markdown(_prettify_answer_for_ui(ans), unsafe_allow_html=True)
+    answer_series = _answer_series_for_visualization(answer_chunks, q.strip())
+    if len(answer_series) >= 2:
+        st.caption("Answer visualization (from extracted chart series)")
+        st.bar_chart(answer_series, use_container_width=False)
+    elif _looks_like_visual_request(q.strip()):
+        metric_series = _series_from_metric_hits_for_query(q.strip(), query_metric_hits)
+        if len(metric_series) >= 2:
+            st.caption("Answer visualization (from extracted metrics)")
+            st.bar_chart(metric_series, use_container_width=True)
 
     panel_chunks = answer_chunks
     _render_charts_and_ocr_panel(panel_chunks, client_for_retrieval)

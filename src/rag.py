@@ -157,8 +157,9 @@ def _enforce_chart_series_consistency(text: str, chunks: list[dict]) -> str:
         out_lines.append(line)
 
     rel = _extract_chart_relative_percent_from_chunks(chunks)
+    rebuilt = "\n".join(out_lines)
     if rel is None:
-        return "\n".join(out_lines)
+        return rebuilt
 
     fixed_lines: list[str] = []
     for line in out_lines:
@@ -166,7 +167,39 @@ def _enforce_chart_series_consistency(text: str, chunks: list[dict]) -> str:
         if "greater than" in low and "u.s" in low and "egp" in low:
             line = re.sub(r"\b\d{1,3}(?:\.\d+)?\s*%\s*greater than\b", f"{rel:g}% greater than", line, flags=re.I)
         fixed_lines.append(line)
-    return "\n".join(fixed_lines)
+    rebuilt = "\n".join(fixed_lines)
+
+    us = series.get("us")
+    egp = series.get("egp")
+    if us is None or egp is None:
+        return rebuilt
+
+    # Hard guard: if model omits one side, inject a concise complete statement.
+    m_ans = re.search(r"(Answer:\s*\n)(.*?)(\n\nKey Points:)", rebuilt, flags=re.S | re.I)
+    if m_ans:
+        ans_body = m_ans.group(2).strip()
+        has_us = re.search(r"\bus\b", ans_body, flags=re.I) and re.search(rf"\b{us:g}\s*%", ans_body)
+        has_egp = re.search(r"\begp\b", ans_body, flags=re.I) and re.search(rf"\b{egp:g}\s*%", ans_body)
+        if not (has_us and has_egp):
+            merged = (
+                f"The U.S. GDP growth value shown in the chart is {us:g}%. "
+                f"The EGP GDP growth value shown in the chart is {egp:g}%."
+            )
+            rebuilt = rebuilt[: m_ans.start(2)] + merged + rebuilt[m_ans.end(2) :]
+
+    # Ensure Key Points always carry the relative statement.
+    if re.search(r"\nKey Points:\s*\n", rebuilt, flags=re.I):
+        if not re.search(r"\bgreater than\b", rebuilt, flags=re.I):
+            kp_inject = f"- The EGP growth rate is {rel:g}% greater than the U.S. average."
+            rebuilt = re.sub(
+                r"(\nKey Points:\s*\n)",
+                r"\1" + kp_inject + "\n",
+                rebuilt,
+                count=1,
+                flags=re.I,
+            )
+
+    return rebuilt
 
 
 def _postprocess_answer(text: str, chunks: list[dict]) -> str:
