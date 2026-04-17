@@ -270,6 +270,23 @@ def _find_chart_chunks_for_query(query: str, client_label: str | None, limit_pag
     return picked
 
 
+def _prettify_answer_for_ui(ans: str) -> str:
+    """
+    Light presentation cleanup for readability.
+    Keeps content unchanged while rendering empty-conflict blocks more subtly.
+    """
+    if not ans:
+        return ans
+    # Replace common "no conflicts" bullet with muted inline text.
+    ans = re.sub(
+        r"Conflicts \(if any\):\s*\n-\s*None apparent from the provided context\.",
+        "Conflicts (if any):\n<sub>None apparent from the provided context.</sub>",
+        ans,
+        flags=re.I,
+    )
+    return ans
+
+
 def _render_charts_and_ocr_panel(chunks: list[dict], client_label: str | None) -> None:
     groups = _group_chart_chunks(chunks)
     if not groups:
@@ -308,12 +325,13 @@ def _render_charts_and_ocr_panel(chunks: list[dict], client_label: str | None) -
         with c2:
             if note:
                 st.info(note)
-            st.text_area(
-                "Chunk text / OCR",
-                value=merged[:12000] + ("…" if len(merged) > 12000 else ""),
-                height=360,
-                key=f"ocr_txt_{uid}",
-            )
+            with st.expander("Extracted chart text (OCR)", expanded=False):
+                st.text_area(
+                    "Extracted chart text (OCR)",
+                    value=merged[:12000] + ("…" if len(merged) > 12000 else ""),
+                    height=360,
+                    key=f"ocr_txt_{uid}",
+                )
 
         nums = _ocr_scan_numbers_for_bar_chart(merged)
         if len(nums) >= 2:
@@ -415,7 +433,7 @@ if ask and q.strip():
         "Heuristic metrics and OCR are **best-effort**. Values tagged **low** confidence or **ocr** "
         "should be verified against the source PDF."
     )
-    st.markdown(ans)
+    st.markdown(_prettify_answer_for_ui(ans), unsafe_allow_html=True)
 
     panel_chunks = answer_chunks
     _render_charts_and_ocr_panel(panel_chunks, client_for_retrieval)

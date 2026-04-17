@@ -91,6 +91,84 @@ def _normalize_source_line(line: str) -> str | None:
     return None
 
 
+def _extract_chart_series_from_chunks(chunks: list[dict]) -> dict[str, float]:
+    """
+    Parse explicit chart series hints from OCR chunks, e.g.
+    [CHART_OCR_SERIES] US=17.7%; EGP=24.2%
+    """
+    series: dict[str, float] = {}
+    for c in chunks:
+        txt = str(c.get("chunk_text") or "")
+        m = re.search(r"\[CHART_OCR_SERIES\]\s*([^\n]+)", txt, flags=re.I)
+        if not m:
+            continue
+        for part in [p.strip() for p in m.group(1).split(";") if p.strip()]:
+            mm = re.match(r"([A-Za-z0-9 _-]{1,24})\s*=\s*([\d.]+)\s*%?", part)
+            if not mm:
+                continue
+            k = mm.group(1).strip().lower()
+            try:
+                series[k] = float(mm.group(2))
+            except ValueError:
+                continue
+    return series
+
+
+def _extract_chart_relative_percent_from_chunks(chunks: list[dict]) -> float | None:
+    """
+    Prefer explicit 'X% greater than' text from OCR chunks.
+    Fallback: compute from US/EGP series if available.
+    """
+    for c in chunks:
+        txt = str(c.get("chunk_text") or "")
+        m = re.search(r"\b(\d{1,3}(?:\.\d+)?)\s*%\s*greater than\b", txt, flags=re.I)
+        if m:
+            try:
+                return float(m.group(1))
+            except ValueError:
+                pass
+
+    series = _extract_chart_series_from_chunks(chunks)
+    us = series.get("us")
+    egp = series.get("egp")
+    if us is not None and egp is not None and us > 0:
+        return round(((egp - us) / us) * 100.0, 1)
+    return None
+
+
+def _enforce_chart_series_consistency(text: str, chunks: list[dict]) -> str:
+    """
+    If explicit chart series exists, correct conflicting percentages in answer/key points
+    for lines that clearly refer to those labels (e.g., US / EGP).
+    """
+    series = _extract_chart_series_from_chunks(chunks)
+    if not series:
+        return text
+    out_lines: list[str] = []
+    for line in text.splitlines():
+        lower = line.lower()
+        for label, value in series.items():
+            if label not in lower:
+                continue
+            # Replace first percentage in this label line with explicit series value.
+            repl = f"{value:g}%"
+            line = re.sub(r"\b\d{1,3}(?:\.\d+)?\s*%", repl, line, count=1)
+            lower = line.lower()
+        out_lines.append(line)
+
+    rel = _extract_chart_relative_percent_from_chunks(chunks)
+    if rel is None:
+        return "\n".join(out_lines)
+
+    fixed_lines: list[str] = []
+    for line in out_lines:
+        low = line.lower()
+        if "greater than" in low and "u.s" in low and "egp" in low:
+            line = re.sub(r"\b\d{1,3}(?:\.\d+)?\s*%\s*greater than\b", f"{rel:g}% greater than", line, flags=re.I)
+        fixed_lines.append(line)
+    return "\n".join(fixed_lines)
+
+
 def _postprocess_answer(text: str, chunks: list[dict]) -> str:
     """Keep wording natural and enforce clean citation style."""
     if not text.strip():
@@ -103,6 +181,7 @@ def _postprocess_answer(text: str, chunks: list[dict]) -> str:
         text,
         flags=re.I,
     )
+    text = _enforce_chart_series_consistency(text, chunks)
 
     sections = re.split(r"\n(?=Sources:\s*$)", text, flags=re.I | re.M)
     if len(sections) == 1:
