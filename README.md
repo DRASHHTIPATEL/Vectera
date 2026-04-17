@@ -75,6 +75,17 @@ streamlit run app.py
 
 ---
 
+## Recent changes
+
+- Added stronger chart/figure OCR ingest behavior: broader chart-page detection (including vector-drawn slides), optional per-image region OCR, and a one-time warning when the Tesseract engine is missing.
+- Added `VECTERA_CHART_OCR` config toggle in `.env.example` so chart OCR can be enabled/disabled without code edits.
+- Improved chart numeric handling to reduce axis-tick confusion and infer explicit series lines (e.g. `[CHART_OCR_SERIES] US=17.7%; EGP=24.2%`) when OCR text supports it.
+- Added chart rendering support in the UI (`src/pdf_render.py`) so retrieved chart pages display directly beside OCR text.
+- Added **Chart Finder mode** in `app.py`, including chart-intent query detection and direct chart-chunk ranking/search to surface chart pages even when standard retrieval is noisy.
+- Cleaned answer formatting via post-processing in `src/rag.py` so source citations are normalized and raw metadata artifacts are removed from final output.
+
+---
+
 ## System architecture (high-level)
 
 1. **Ingestion** (`src/ingestion.py`) — `pdfplumber` pulls text per page. Tables get flattened to text when extraction works. If a page is basically empty but looks image-heavy, I attach a short note so we don’t pretend we read the chart.

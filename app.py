@@ -209,9 +209,13 @@ def _chart_match_score(query: str, chunk: dict) -> float:
     if chunk.get("source_type") == "ocr" or chunk.get("ocr_low_confidence"):
         score += 0.25
     if "[chart_ocr_series]" in text:
-        score += 0.5
+        score += 0.95
     if chunk.get("chart_note"):
         score += 0.15
+    if "gdp" in ql and "gdp" in text:
+        score += 0.2
+    if "us" in ql and "egp" in ql and "us" in text and "egp" in text:
+        score += 0.35
 
     tokens = _query_tokens_for_chart_finder(query)
     for t in tokens[:14]:
@@ -220,6 +224,23 @@ def _chart_match_score(query: str, chunk: dict) -> float:
     if _is_chart_request(ql):
         score += 0.06
     return score
+
+
+def _chart_answer_chunks(query: str, chart_chunks: list[dict], fallback_chunks: list[dict]) -> list[dict]:
+    """
+    Keep LLM context tight for chart questions:
+    prefer pages with explicit inferred series, then high-scoring chart matches.
+    """
+    if not chart_chunks:
+        return fallback_chunks
+    scored = sorted((( _chart_match_score(query, c), c) for c in chart_chunks), key=lambda x: x[0], reverse=True)
+    explicit = [c for s, c in scored if "[CHART_OCR_SERIES]" in (c.get("chunk_text") or "")]
+    if explicit:
+        return explicit[:2]
+    best = [c for s, c in scored if s > 0.35]
+    if best:
+        return best[:3]
+    return [c for _, c in scored[:2]] if scored else fallback_chunks
 
 
 def _find_chart_chunks_for_query(query: str, client_label: str | None, limit_pages: int = 6) -> list[dict]:
@@ -386,7 +407,7 @@ if ask and q.strip():
                 client_for_retrieval,
                 limit_pages=max(4, n_sources),
             )
-        answer_chunks = chart_chunks if chart_chunks else chunks
+        answer_chunks = _chart_answer_chunks(q.strip(), chart_chunks, chunks)
         ans = answer_question(q.strip(), answer_chunks)
         query_metric_hits = match_metrics_for_query(q.strip(), client_for_retrieval, limit=12)
 
