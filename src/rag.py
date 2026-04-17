@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from openai import APIConnectionError, APITimeoutError, OpenAI
 
 from src.config import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, USE_OLLAMA
@@ -14,10 +16,12 @@ Rules (must follow all):
 2) Do NOT invent facts, numbers, or sources. Do NOT use outside knowledge to fill gaps.
 3) If two context excerpts disagree (different numbers, dates, or claims), do NOT merge them into one blended fact. Present each version separately (e.g., "According to …" for each).
 4) When multiple VERSION labels exist for the same company, explicitly attribute statements to the version (e.g., "According to Version 2024-Q1 …").
+4b) If the question compares **two or more time periods** (e.g. different months/years or decks), answer **for each period separately** using only the CONTEXT lines that match that period or file. If context for a named period is missing, say it is not in the retrieved excerpts.
 5) Every factual claim in your answer must be traceable to a source line below. Use inline citations like [DocumentName p.Page].
 6) If context mentions that chart/table data could not be fully extracted, reflect that honestly; do not guess chart values.
 7) Do NOT blame "chart extraction" or "image-heavy pages" unless that exact limitation appears in the CONTEXT for the relevant excerpt. If the topic is simply missing from the documents, say the documents do not address it.
 8) In **Sources**, every line MUST look like a human citation: `- Filename.pdf (Page N) [Version: label]`. Do NOT echo CONTEXT headers or use `document=…|page=…|company=…` key-value style.
+9) For chart OCR excerpts: treat y-axis tick marks (e.g. 0%, 5%, 10%, 15%, ...) as scale only, not data values. Prefer explicit bar labels or `[CHART_OCR_SERIES]` when available.
 
 Output format (exact headings):
 
@@ -35,6 +39,90 @@ Sources:
 - <document_filename.pdf> (Page <n>) [Version: <version>]
 - (repeat per source; same format only)
 """
+
+
+def _fallback_sources(chunks: list[dict]) -> list[str]:
+    out: list[str] = []
+    seen: set[tuple[str, int, str]] = set()
+    for c in chunks:
+        doc = str(c.get("document_name") or "").strip()
+        page = int(c.get("page_number") or 0)
+        ver = str(c.get("version") or "unknown").strip() or "unknown"
+        if not doc or page <= 0:
+            continue
+        key = (doc, page, ver)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(f"- {doc} (Page {page}) [Version: {ver}]")
+    return out or ["- (none)"]
+
+
+def _normalize_source_line(line: str) -> str | None:
+    line = line.strip().lstrip("-").strip()
+    if not line:
+        return None
+
+    # Already in desired style.
+    m_human = re.search(r"(.+?)\s*\(Page\s*(\d+)\)\s*\[Version:\s*([^\]]+)\]", line, flags=re.I)
+    if m_human:
+        doc = m_human.group(1).strip()
+        page = int(m_human.group(2))
+        ver = m_human.group(3).strip()
+        return f"- {doc} (Page {page}) [Version: {ver}]"
+
+    # Parse key=value style lines produced by some models.
+    doc = None
+    page = None
+    ver = None
+    m_doc = re.search(r"document=([^|]+)", line, flags=re.I)
+    if m_doc:
+        doc = m_doc.group(1).strip()
+    m_page = re.search(r"page=(\d+)", line, flags=re.I)
+    if m_page:
+        page = int(m_page.group(1))
+    m_ver = re.search(r"version=([^|\]]+)", line, flags=re.I)
+    if m_ver:
+        ver = m_ver.group(1).strip()
+
+    if doc and page:
+        ver = ver or "unknown"
+        return f"- {doc} (Page {page}) [Version: {ver}]"
+    return None
+
+
+def _postprocess_answer(text: str, chunks: list[dict]) -> str:
+    """Keep wording natural and enforce clean citation style."""
+    if not text.strip():
+        return text
+
+    # Remove raw model artifacts like "[DocumentName p.7 | source_type=ocr | ...]".
+    text = re.sub(
+        r"\s*\[[^\]\n]*(?:documentname|source_type|confidence|version\s*[:=])[^\]\n]*\]",
+        "",
+        text,
+        flags=re.I,
+    )
+
+    sections = re.split(r"\n(?=Sources:\s*$)", text, flags=re.I | re.M)
+    if len(sections) == 1:
+        # No explicit Sources section: append normalized fallback sources.
+        return text.rstrip() + "\n\nSources:\n" + "\n".join(_fallback_sources(chunks))
+
+    head = sections[0].rstrip()
+    tail = sections[1]
+    lines = [ln for ln in tail.splitlines()[1:] if ln.strip()]
+    norm: list[str] = []
+    seen: set[str] = set()
+    for ln in lines:
+        n = _normalize_source_line(ln)
+        if not n or n in seen:
+            continue
+        seen.add(n)
+        norm.append(n)
+    if not norm:
+        norm = _fallback_sources(chunks)
+    return head + "\n\nSources:\n" + "\n".join(norm)
 
 
 def _format_context(chunks: list[dict]) -> str:
@@ -135,4 +223,4 @@ def answer_question(question: str, chunks: list[dict]) -> str:
             )
         )
     text = (resp.choices[0].message.content or "").strip()
-    return text
+    return _postprocess_answer(text, chunks)

@@ -6,8 +6,11 @@ Documents are indexed offline via ingest.py; this app does not chunk or embed do
 
 from __future__ import annotations
 
+import hashlib
 import re
 import sys
+from collections import OrderedDict
+from io import BytesIO
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -17,7 +20,15 @@ if str(ROOT) not in sys.path:
 import streamlit as st
 
 from src.config import DATABASE_URL, OPENAI_BASE_URL, OPENAI_MODEL, USE_OLLAMA, ensure_dirs, use_postgres
-from src.persistence import backend_name, list_documents, list_metrics_for_client, match_metrics_for_query
+from src.persistence import (
+    backend_name,
+    get_document_stored_path,
+    list_chart_chunks,
+    list_documents,
+    list_metrics_for_client,
+    match_metrics_for_query,
+)
+from src.pdf_render import render_pdf_page_png_bytes
 from src.rag import answer_question
 from src.retrieval import diversified_retrieve
 
@@ -72,6 +83,227 @@ def _pct_or_float(s: str) -> float | None:
         mult = {"B": 1e9, "M": 1e6, "K": 1e3}.get(m.group(2) or "", 1)
         return n * mult
     return None
+
+
+def _chunk_is_chart_like(c: dict) -> bool:
+    st = (c.get("structured_type") or "").lower()
+    src = (c.get("source_type") or "").lower()
+    if st == "chart" or src == "ocr":
+        return True
+    if c.get("chart_note"):
+        return True
+    ct = c.get("chunk_text") or ""
+    return "[CHART_OR_FIGURE_OCR]" in ct or "[OCR_EXTRACTED]" in ct
+
+
+def _ocr_scan_numbers_for_bar_chart(text: str) -> dict[str, float]:
+    """Parse chart OCR hints; prefer explicit series, avoid axis-tick bars."""
+    sm = re.search(r"\[CHART_OCR_SERIES\]\s*([^\n]+)", text)
+    if sm:
+        out_series: dict[str, float] = {}
+        for item in [p.strip() for p in sm.group(1).split(";") if p.strip()]:
+            mm = re.match(r"([A-Za-z0-9 _-]{1,24})\s*=\s*([\d.]+)\s*%?", item)
+            if not mm:
+                continue
+            try:
+                out_series[mm.group(1).strip()] = float(mm.group(2))
+            except ValueError:
+                continue
+        if len(out_series) >= 2:
+            return out_series
+
+    m = re.search(r"\[CHART_OCR_NUMBERS_SCAN\]\s*([^\n]+)", text)
+    if not m:
+        return {}
+    parts = [p.strip() for p in m.group(1).split(",") if p.strip()]
+    out: dict[str, float] = {}
+    for i, p in enumerate(parts[:24]):
+        v = _pct_or_float(p)
+        if v is None:
+            try:
+                clean = re.sub(r"[^\d.\-]", "", p)
+                if clean:
+                    v = float(clean)
+            except ValueError:
+                continue
+        if v is None:
+            continue
+        # Ignore likely axis ticks when we have richer values.
+        if abs(v - round(v)) < 1e-9 and (int(round(v)) % 5 == 0):
+            continue
+        label = p if len(p) <= 28 else p[:25] + "…"
+        out[f"{i + 1}. {label}"] = float(v)
+    if out:
+        return out
+    # Fallback: keep behavior if everything got filtered.
+    for i, p in enumerate(parts[:24]):
+        v = _pct_or_float(p)
+        if v is None:
+            continue
+        label = p if len(p) <= 28 else p[:25] + "…"
+        out[f"{i + 1}. {label}"] = float(v)
+    return out
+
+
+def _group_chart_chunks(chunks: list[dict]) -> "OrderedDict[tuple[str, int], list[dict]]":
+    groups: OrderedDict[tuple[str, int], list[dict]] = OrderedDict()
+    for c in chunks:
+        if not _chunk_is_chart_like(c):
+            continue
+        key = (c["document_name"], int(c["page_number"]))
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(c)
+    return groups
+
+
+_CHART_QUERY_STOP = {
+    "the",
+    "a",
+    "an",
+    "what",
+    "which",
+    "show",
+    "display",
+    "from",
+    "this",
+    "that",
+    "with",
+    "chart",
+    "graph",
+    "figure",
+    "slide",
+    "pdf",
+    "page",
+}
+
+
+def _query_tokens_for_chart_finder(query: str) -> list[str]:
+    toks = [t for t in re.split(r"\W+", (query or "").lower()) if len(t) > 2]
+    return [t for t in toks if t not in _CHART_QUERY_STOP]
+
+
+def _is_chart_request(query: str) -> bool:
+    ql = (query or "").lower()
+    if any(k in ql for k in ("chart", "graph", "figure", "plot", "bar", "line chart", "slide")):
+        return True
+    # Common analyst phrasing that still means "show chart-like evidence".
+    if ("show" in ql or "display" in ql) and ("trend" in ql or "over time" in ql):
+        return True
+    return False
+
+
+def _chart_match_score(query: str, chunk: dict) -> float:
+    ql = (query or "").lower()
+    text = " ".join(
+        [
+            str(chunk.get("chunk_text") or "").lower(),
+            str(chunk.get("document_name") or "").lower(),
+            str(chunk.get("company_name") or "").lower(),
+            str(chunk.get("version") or "").lower(),
+        ]
+    )
+    score = 0.0
+    if chunk.get("structured_type") == "chart":
+        score += 0.6
+    if chunk.get("source_type") == "ocr" or chunk.get("ocr_low_confidence"):
+        score += 0.25
+    if "[chart_ocr_series]" in text:
+        score += 0.5
+    if chunk.get("chart_note"):
+        score += 0.15
+
+    tokens = _query_tokens_for_chart_finder(query)
+    for t in tokens[:14]:
+        if t in text:
+            score += 0.09
+    if _is_chart_request(ql):
+        score += 0.06
+    return score
+
+
+def _find_chart_chunks_for_query(query: str, client_label: str | None, limit_pages: int = 6) -> list[dict]:
+    rows = list_chart_chunks(client_label=client_label, limit=1500)
+    if not rows:
+        return []
+    by_page: dict[tuple[str, int], tuple[float, dict]] = {}
+    for r in rows:
+        key = (str(r.get("document_name") or ""), int(r.get("page_number") or 0))
+        if not key[0] or key[1] <= 0:
+            continue
+        s = _chart_match_score(query, r)
+        prev = by_page.get(key)
+        if prev is None or s > prev[0]:
+            by_page[key] = (s, r)
+    ranked = sorted(by_page.values(), key=lambda x: x[0], reverse=True)
+    picked: list[dict] = []
+    for s, r in ranked:
+        if s <= 0 and _is_chart_request(query):
+            # Keep recent chart pages for broad "show chart" asks.
+            pass
+        elif s <= 0:
+            continue
+        picked.append(r)
+        if len(picked) >= limit_pages:
+            break
+    return picked
+
+
+def _render_charts_and_ocr_panel(chunks: list[dict], client_label: str | None) -> None:
+    groups = _group_chart_chunks(chunks)
+    if not groups:
+        return
+
+    st.subheader("Charts & OCR — retrieved excerpts")
+    st.caption(
+        "**Left:** page rendered from the indexed PDF. **Right:** text stored for this chunk (includes OCR when used). "
+        "Numbers are approximate; verify material figures in the source file."
+    )
+
+    for (doc_name, page_num), group in groups.items():
+        merged = "\n\n---\n\n".join((x.get("chunk_text") or "").strip() for x in group if (x.get("chunk_text") or "").strip())
+        note = next((x.get("chart_note") for x in group if x.get("chart_note")), None)
+        ver = group[0].get("version") or "—"
+        uid = hashlib.sha256(f"{doc_name}:{page_num}".encode()).hexdigest()[:16]
+
+        st.markdown(f"##### {doc_name} · page {page_num} · `{ver}`")
+
+        stored = get_document_stored_path(doc_name, client_label)
+        png_bytes: bytes | None = None
+        if stored:
+            pth = Path(stored)
+            if not pth.is_file():
+                alt = ROOT / stored
+                pth = alt if alt.is_file() else pth
+            if pth.is_file():
+                png_bytes = render_pdf_page_png_bytes(pth, page_num)
+
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            if png_bytes:
+                st.image(BytesIO(png_bytes), caption=f"Rendered page {page_num}", use_container_width=True)
+            else:
+                st.caption("Page preview unavailable (missing file on disk or render error).")
+        with c2:
+            if note:
+                st.info(note)
+            st.text_area(
+                "Chunk text / OCR",
+                value=merged[:12000] + ("…" if len(merged) > 12000 else ""),
+                height=360,
+                key=f"ocr_txt_{uid}",
+            )
+
+        nums = _ocr_scan_numbers_for_bar_chart(merged)
+        if len(nums) >= 2:
+            st.caption("OCR numeric scan (ingestion heuristic — not axis labels)")
+            st.bar_chart(nums)
+        elif len(nums) == 1:
+            only_k, only_v = next(iter(nums.items()))
+            st.metric(label="Single OCR token (from scan line)", value=f"{only_v:g}", help=only_k)
+
+        st.divider()
+
 
 _faiss_ntotal: int | None = None
 if not use_postgres():
@@ -134,6 +366,12 @@ q = st.text_area(
 col_a, col_b = st.columns([1, 4])
 with col_a:
     n_sources = st.slider("Chunks to retrieve", min_value=5, max_value=8, value=6)
+with col_b:
+    chart_finder_mode = st.checkbox(
+        "Chart Finder mode (prioritize chart-page display)",
+        value=False,
+        help="When enabled, the app also searches chart/OCR chunks directly and displays top matching chart pages.",
+    )
 ask = st.button("Answer", type="primary")
 
 client_for_retrieval = client.strip() if client and client.strip() else None
@@ -141,7 +379,15 @@ client_for_retrieval = client.strip() if client and client.strip() else None
 if ask and q.strip():
     with st.spinner("Retrieving and reasoning…"):
         chunks = diversified_retrieve(q.strip(), final_k=n_sources, client_label=client_for_retrieval)
-        ans = answer_question(q.strip(), chunks)
+        chart_chunks: list[dict] = []
+        if chart_finder_mode or _is_chart_request(q.strip()):
+            chart_chunks = _find_chart_chunks_for_query(
+                q.strip(),
+                client_for_retrieval,
+                limit_pages=max(4, n_sources),
+            )
+        answer_chunks = chart_chunks if chart_chunks else chunks
+        ans = answer_question(q.strip(), answer_chunks)
         query_metric_hits = match_metrics_for_query(q.strip(), client_for_retrieval, limit=12)
 
     st.caption(
@@ -150,7 +396,12 @@ if ask and q.strip():
     )
     st.markdown(ans)
 
-    structured_metrics = _collect_structured_metrics(chunks)
+    panel_chunks = answer_chunks
+    _render_charts_and_ocr_panel(panel_chunks, client_for_retrieval)
+    if (chart_finder_mode or _is_chart_request(q.strip())) and not _group_chart_chunks(panel_chunks):
+        st.info("No chart-like pages matched this query in the indexed corpus.")
+
+    structured_metrics = _collect_structured_metrics(answer_chunks)
     if structured_metrics:
         st.subheader("Key metrics (retrieval)")
         cols = st.columns(min(3, len(structured_metrics)))

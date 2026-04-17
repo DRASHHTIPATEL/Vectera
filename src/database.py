@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import re
 from typing import Any, Generator, Iterable
 
-from sqlalchemy import DateTime, Float, Integer, String, Text, create_engine, func, select
+from sqlalchemy import DateTime, Float, Integer, String, Text, create_engine, func, or_, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from src.config import DB_PATH, ensure_dirs
@@ -243,6 +243,43 @@ def list_documents(client_label: str | None = None) -> list[dict[str, Any]]:
         ]
 
 
+def get_document_stored_path(document_name: str, client_label: str | None = None) -> str | None:
+    """Filesystem path saved at ingest (for rendering PDF pages in the UI)."""
+    with session_scope() as s:
+        stmt = select(DocumentRecord.stored_path).where(DocumentRecord.document_name == document_name)
+        if client_label is not None and client_label.strip():
+            stmt = stmt.where(DocumentRecord.client_label == client_label.strip())
+        stmt = stmt.order_by(DocumentRecord.id.desc()).limit(1)
+        return s.execute(stmt).scalar_one_or_none()
+
+
+def list_chart_chunks(client_label: str | None = None, limit: int = 1200) -> list[dict[str, Any]]:
+    """Return chart/OCR-like chunks for optional chart-finder mode in the UI."""
+    with session_scope() as s:
+        stmt = (
+            select(ChunkRecord)
+            .join(DocumentRecord, ChunkRecord.document_id == DocumentRecord.id)
+            .where(
+                or_(
+                    ChunkRecord.structured_type == "chart",
+                    ChunkRecord.source_type == "ocr",
+                    ChunkRecord.chart_note.is_not(None),
+                    ChunkRecord.ocr_low_confidence == 1,
+                )
+            )
+            .order_by(
+                ChunkRecord.document_year.desc(),
+                ChunkRecord.document_month.desc(),
+                ChunkRecord.id.desc(),
+            )
+            .limit(limit)
+        )
+        if client_label is not None and client_label.strip():
+            stmt = stmt.where(DocumentRecord.client_label == client_label.strip())
+        rows = s.execute(stmt).scalars().all()
+        return [_chunk_to_dict(r) for r in rows]
+
+
 def has_document_version(document_name: str, version: str, client_label: str | None = None) -> bool:
     with session_scope() as s:
         stmt = select(func.count(DocumentRecord.id)).where(
@@ -368,9 +405,8 @@ def match_metrics_for_query(
         if client_label and client_label.strip():
             stmt = stmt.where(DocumentRecord.client_label == client_label.strip())
         rows = list(s.execute(stmt).all())
-
-    ranked = rank_metric_query_matches(rows, tokens, limit)
-    return [_metric_row_to_dict(em, clab) for em, clab in ranked]
+        ranked = rank_metric_query_matches(rows, tokens, limit)
+        return [_metric_row_to_dict(em, clab) for em, clab in ranked]
 
 
 def list_metrics_for_client(client_label: str | None, limit: int = 500) -> list[dict[str, Any]]:
@@ -389,4 +425,4 @@ def list_metrics_for_client(client_label: str | None, limit: int = 500) -> list[
         if client_label and client_label.strip():
             stmt = stmt.where(DocumentRecord.client_label == client_label.strip())
         rows = s.execute(stmt).all()
-    return [_metric_row_to_dict(em, clab) for em, clab in rows]
+        return [_metric_row_to_dict(em, clab) for em, clab in rows]

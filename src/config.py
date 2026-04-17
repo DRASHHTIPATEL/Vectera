@@ -60,6 +60,9 @@ MAX_CHUNKS_PER_DOCUMENT_IN_BATCH = 3
 
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 
+# Ingestion: Tesseract OCR for chart-heavy / image slides (see src/ingestion.py). Set to 0 to skip.
+CHART_OCR_ENABLED = os.getenv("VECTERA_CHART_OCR", "1").strip().lower() not in ("0", "false", "no")
+
 
 def ensure_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)

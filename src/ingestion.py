@@ -5,10 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 import re
+import shutil
 from pathlib import Path
 from typing import BinaryIO
 
+from src.config import CHART_OCR_ENABLED
+
 LOGGER = logging.getLogger(__name__)
+_TESSERACT_WARNED = False
 
 # Visual / chart-style pages: OCR when pdf text is thin but raster content likely.
 _CHART_HINT_WORDS = frozenset(
@@ -27,6 +31,7 @@ _CHART_HINT_WORDS = frozenset(
     )
 )
 _OCR_RESOLUTION = 300
+_MAX_IMAGE_REGIONS_OCR = 6
 
 
 MONTH_MAP = {
@@ -97,8 +102,13 @@ def infer_metadata_from_filename(filename: str) -> DocumentMetadata:
 
     month = None
     year = None
+
+    qfy = re.search(r"\bq([1-4])[-_\s]?(20\d{2})\b", lower)
+    if qfy:
+        year = int(qfy.group(2))
+
     md = re.search(r"\b(\d{1,2})[./-](\d{1,2})[./-](20\d{2})\b", lower)
-    if md:
+    if md and year is None:
         month = int(md.group(1))
         year = int(md.group(3))
     m = re.search(
@@ -115,6 +125,36 @@ def infer_metadata_from_filename(filename: str) -> DocumentMetadata:
         y = re.search(r"\b(20\d{2})\b", lower)
         if y and year is None:
             year = int(y.group(1))
+
+    # Extra passes when primary patterns miss (e.g. filenames with investor-day-2025, appendix dates).
+    if year is None:
+        for _pat in (
+            r"investor[-_\s]?day[-_\s]?(20\d{2})",
+            r"roadshow[-_\s]?(20\d{2})",
+            r"(20\d{2})[-_\s]?appendix",
+            r"appendix[-_\s]?(20\d{2})",
+        ):
+            m2 = re.search(_pat, lower)
+            if m2:
+                year = int(m2.group(m2.lastindex))
+                break
+    if year is None:
+        years_found = sorted({int(x) for x in re.findall(r"\b(20\d{2})\b", lower)})
+        if years_found:
+            year = years_found[-1]
+    if month is None:
+        mshort = re.search(
+            r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[-_\.](\d{2})\b(?!\d)",
+            lower,
+        )
+        if mshort:
+            mo = MONTH_MAP.get(mshort.group(1)[:3])
+            yy = int(mshort.group(2))
+            full_y = yy + (2000 if yy < 50 else 1900)
+            if full_y >= 2000 and full_y <= 2035:
+                month = mo
+                if year is None:
+                    year = full_y
 
     if year and month:
         version_label = f"{SHORT_MONTH.get(month, 'unk')}-{year}"
@@ -227,6 +267,23 @@ def _page_suggests_chart_or_figure(text: str, n_images: int) -> bool:
     return False
 
 
+def _should_run_chart_ocr(text: str, n_images: int, table_parts: bool) -> bool:
+    """
+    When to rasterize the page and run Tesseract.
+
+    Many decks draw charts as vectors (no `page.images`); full-page render still paints them,
+    so we also trigger on chart keywords + moderate text length without requiring embedded images.
+    """
+    if table_parts:
+        return False
+    if n_images > 0 and (len(text) < 80 or _page_suggests_chart_or_figure(text, n_images)):
+        return True
+    t = text.lower()
+    if len(text) < 280 and any(w in t for w in _CHART_HINT_WORDS):
+        return True
+    return False
+
+
 def _merge_ocr_passes(chunks: list[str]) -> str:
     """Deduplicate lines from multiple Tesseract configs; preserve rough order."""
     seen: set[str] = set()
@@ -265,44 +322,192 @@ def _scan_numeric_tokens_for_chart_ocr(txt: str) -> str:
     return txt + "\n[CHART_OCR_NUMBERS_SCAN] " + ", ".join(uniq)
 
 
-def _try_ocr_text(page: object) -> str:
+def _infer_chart_series_line(txt: str) -> str:
     """
-    Chart/figure pages: higher-res raster OCR with preprocessing + two PSM passes.
-    Best-effort only; still marked low-confidence downstream.
+    Infer a simple label->value mapping for 2-category bar charts from OCR text.
+    Example target: [CHART_OCR_SERIES] US=17.7%; EGP=24.2%
     """
+    lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+
+    label_line = ""
+    for ln in lines:
+        toks = re.findall(r"\b[A-Z]{2,6}\b", ln)
+        if 2 <= len(toks) <= 4:
+            label_line = ln
+            break
+    if not label_line:
+        return ""
+    labels = re.findall(r"\b[A-Z]{2,6}\b", label_line)
+    if len(labels) < 2:
+        return ""
+    labels = labels[:2]
+
+    vals: list[float] = []
+    for m in re.finditer(r"\b(\d{1,3}(?:\.\d+)?)\s*%", txt):
+        try:
+            v = float(m.group(1))
+        except ValueError:
+            continue
+        # Filter likely axis ticks (round values like 0/5/10/.../100)
+        if abs(v - round(v)) < 1e-9 and (int(round(v)) % 5 == 0):
+            continue
+        if 0.0 <= v <= 100.0:
+            vals.append(v)
+    # Fallback if everything was filtered out.
+    if len(vals) < 2:
+        for m in re.finditer(r"\b(\d{1,3}(?:\.\d+)?)\s*%", txt):
+            try:
+                v = float(m.group(1))
+            except ValueError:
+                continue
+            if 0.0 <= v <= 100.0:
+                vals.append(v)
+    if len(vals) < 2:
+        return ""
+
+    uniq_vals: list[float] = []
+    for v in vals:
+        if any(abs(v - u) < 1e-6 for u in uniq_vals):
+            continue
+        uniq_vals.append(v)
+        if len(uniq_vals) >= len(labels):
+            break
+    if len(uniq_vals) < len(labels):
+        return ""
+
+    if len(labels) == 2 and len(uniq_vals) == 2:
+        def _norm(s: str) -> str:
+            return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
+
+        def _loose_token_pat(tok: str) -> str:
+            chars = [re.escape(ch) for ch in tok if ch.isalnum()]
+            if not chars:
+                return re.escape(tok)
+            return r"\s*".join(chars)
+
+        l0 = _norm(labels[0])
+        l1 = _norm(labels[1])
+        low_txt = _norm(txt)
+        p0 = _loose_token_pat(l0)
+        p1 = _loose_token_pat(l1)
+        # If OCR text states one category is greater than the other, map accordingly.
+        if re.search(rf"\b{p1}\b.*\bgreater than\b.*\b{p0}\b", low_txt):
+            uniq_vals = [min(uniq_vals), max(uniq_vals)]
+        elif re.search(rf"\b{p0}\b.*\bgreater than\b.*\b{p1}\b", low_txt):
+            uniq_vals = [max(uniq_vals), min(uniq_vals)]
+
+    pairs = [f"{lab}={val:g}%" for lab, val in zip(labels, uniq_vals)]
+    return "[CHART_OCR_SERIES] " + "; ".join(pairs)
+
+
+def _ensure_tesseract_logged_once() -> bool:
+    global _TESSERACT_WARNED
+    ok = bool(shutil.which("tesseract"))
+    if not ok and not _TESSERACT_WARNED:
+        LOGGER.warning(
+            "Tesseract not found on PATH — chart/figure OCR is skipped during ingest. "
+            "Install the engine (e.g. `brew install tesseract` on macOS) and re-run ingest."
+        )
+        _TESSERACT_WARNED = True
+    return ok
+
+
+def _pdf_image_bbox_to_pil_crop(img_dict: dict, page: object, pil_full: object):
+    """Map pdfplumber image dict x0/top/x1/bottom to a PIL crop of the rendered page."""
+    try:
+        pw, ph = float(page.width), float(page.height)
+        iw, ih = pil_full.size
+        sx = iw / pw
+        sy = ih / ph
+        x0, x1 = float(img_dict["x0"]), float(img_dict["x1"])
+        top, bottom = float(img_dict["top"]), float(img_dict["bottom"])
+        left = int(max(0, min(x0, x1) * sx))
+        right = int(min(iw, max(x0, x1) * sx))
+        upper = int(max(0, min(top, bottom) * sy))
+        lower = int(min(ih, max(top, bottom) * sy))
+        if right - left < 20 or lower - upper < 20:
+            return None
+        return pil_full.crop((left, upper, right, lower))
+    except Exception:
+        return None
+
+
+def _ocr_pil_image(img: object) -> str:
+    """Tesseract on one PIL image: preprocess + multi-PSM merge (best-effort)."""
     try:
         import pytesseract  # type: ignore
-        from PIL import ImageEnhance, ImageOps  # noqa: F401
-
-        img = page.to_image(resolution=_OCR_RESOLUTION).original
-        try:
-            if img.mode not in ("L", "1"):
-                img = img.convert("L")
-            img = ImageOps.autocontrast(img, cutoff=2)
-            img = ImageEnhance.Contrast(img).enhance(1.12)
-        except Exception:
-            pass
-
-        chunks: list[str] = []
-        for cfg in ("--oem 3 --psm 6", "--oem 3 --psm 11"):
-            try:
-                t = pytesseract.image_to_string(img, config=cfg) or ""
-                t = t.strip()
-                if t:
-                    chunks.append(t)
-            except Exception:
-                continue
-        if not chunks:
-            return ""
-        merged = _merge_ocr_passes(chunks)
-        merged = _normalize_numeric_noise(merged)
-        if not merged.strip():
-            return ""
-        merged = _scan_numeric_tokens_for_chart_ocr(merged)
-        return f"[CHART_OR_FIGURE_OCR]\n[OCR_EXTRACTED]\n{merged}"
+        from PIL import ImageEnhance, ImageOps
     except Exception:
         return ""
-    return ""
+
+    try:
+        if getattr(img, "mode", None) not in ("L", "1"):
+            img = img.convert("L")
+        img = ImageOps.autocontrast(img, cutoff=2)
+        img = ImageEnhance.Contrast(img).enhance(1.12)
+    except Exception:
+        pass
+
+    chunks: list[str] = []
+    for cfg in ("--oem 3 --psm 6", "--oem 3 --psm 11", "--oem 3 --psm 4"):
+        try:
+            t = pytesseract.image_to_string(img, config=cfg) or ""
+            t = t.strip()
+            if t:
+                chunks.append(t)
+        except Exception:
+            continue
+    if not chunks:
+        return ""
+    merged = _merge_ocr_passes(chunks)
+    merged = _normalize_numeric_noise(merged)
+    return merged.strip()
+
+
+def _try_ocr_text(page: object) -> str:
+    """
+    Chart/figure pages: full-page raster OCR plus optional per-embedded-image crops.
+    Marked low-confidence downstream; requires Tesseract on PATH when enabled.
+    """
+    if not CHART_OCR_ENABLED:
+        return ""
+    if not _ensure_tesseract_logged_once():
+        return ""
+    try:
+        import pytesseract  # noqa: F401
+    except Exception:
+        return ""
+
+    try:
+        pil_img = page.to_image(resolution=_OCR_RESOLUTION).original
+    except Exception:
+        return ""
+
+    parts: list[str] = []
+    full_txt = _ocr_pil_image(pil_img)
+    if full_txt:
+        parts.append(full_txt)
+
+    for img_meta in (getattr(page, "images", None) or [])[:_MAX_IMAGE_REGIONS_OCR]:
+        crop = _pdf_image_bbox_to_pil_crop(img_meta, page, pil_img)
+        if crop is None:
+            continue
+        region_txt = _ocr_pil_image(crop)
+        if region_txt:
+            parts.append(region_txt)
+
+    if not parts:
+        return ""
+    merged = _merge_ocr_passes(parts)
+    if not merged.strip():
+        return ""
+    merged = _scan_numeric_tokens_for_chart_ocr(merged)
+    series_line = _infer_chart_series_line(merged)
+    if series_line:
+        merged = merged + "\n" + series_line
+    return f"[CHART_OR_FIGURE_OCR]\n[OCR_EXTRACTED]\n{merged}"
 
 
 def extract_pdf_pages(file_obj: BinaryIO | bytes, filename: str) -> list[PageContent]:
@@ -353,11 +558,7 @@ def extract_pdf_pages(file_obj: BinaryIO | bytes, filename: str) -> list[PageCon
             ocr_low = False
             imgs = getattr(page, "images", None) or []
             n_img = len(imgs)
-            want_chart_ocr = (
-                not table_parts
-                and n_img > 0
-                and (len(text) < 80 or _page_suggests_chart_or_figure(text, n_img))
-            )
+            want_chart_ocr = _should_run_chart_ocr(text, n_img, bool(table_parts))
             if want_chart_ocr:
                 ocr_text = _try_ocr_text(page)
                 if ocr_text:

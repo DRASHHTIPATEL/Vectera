@@ -162,9 +162,20 @@ Retrieval tries to surface more than one relevant excerpt; the prompt tells the 
 
 ---
 
-## Charts, tables, and structured content
+## Charts, tables, and structured content (Part 2)
 
-Tables: `pdfplumber` `extract_tables()` → text in the chunk when it works. Charts: often there’s nothing reliable to extract; I flag that on the page so the model doesn’t invent series. The prompt also says not to blame “chart extraction” unless that note actually appears in context (rule 7 in `src/rag.py`).
+**Tables:** `pdfplumber` `extract_tables()` (with optional Camelot / Tabula fallbacks where installed) → flattened into chunk text as `[STRUCTURED_TABLE] …` when extraction succeeds.
+
+**Charts / figures:** Slides are not “readable data” the way tables are. This pipeline does **not** parse bar heights or plot series mathematically (that would need specialized CV or a vision model). Instead, at **ingest** time it:
+
+1. **Detects** likely chart/slide pages: short text, chart-related vocabulary (`chart`, `figure`, `y/y`, …), or embedded images in the PDF.
+2. **Rasterizes** the page (vector drawings are included in the render even when there are no embedded `page.images`).
+3. Runs **Tesseract** OCR (`pytesseract`) on the full page and, when present, on up to **six embedded image regions** for extra detail.
+4. Tags chunks as `source_type=ocr`, `structured_type=chart`, and attaches a **chart warning** so the model does not invent numbers. A compact **`[CHART_OCR_NUMBERS_SCAN]`** line helps embeddings pick up digits that OCR found.
+
+**Setup:** install the Tesseract **engine** on the machine that runs `ingest.py` (e.g. macOS: `brew install tesseract`). Without it, ingest logs a warning and skips OCR; text and tables still index. To disable OCR even when Tesseract is installed, set `VECTERA_CHART_OCR=0` in `.env` (see `.env.example`).
+
+The query-time prompt (`src/rag.py`) tells the model not to blame “chart extraction” unless that limitation appears in the retrieved context.
 
 ---
 
@@ -176,7 +187,8 @@ There’s a **Client / workspace** field and `client_label` on documents. In Pos
 
 ## Known limitations
 
-- No OCR for scanned PDFs.
+- Chart OCR is **best-effort** (layout, fonts, and colors cause misreads); it is not a substitute for reading the PDF for audited numbers.
+- Truly **scanned** whole documents (no vector text) are only partially helped by the same OCR path; heavy scan corpora deserve a dedicated OCR pass per page.
 - Off-the-shelf embeddings, not finance-tuned.
 - SQLite path has no server-side RLS; use Postgres for a “real” deployment story.
 - Change embedding model/dimension → re-ingest.
@@ -185,7 +197,7 @@ There’s a **Client / workspace** field and `client_label` on documents. In Pos
 
 ## What I’d do with more time
 
-Hybrid retrieval (BM25 + vectors) for tickers and exact strings, OCR for image-only pages, a small eval set with golden answers, Snowflake behind the same `persistence` interface, and vector index tuning (IVFFLAT / HNSW) at scale.
+Hybrid retrieval (BM25 + vectors) for tickers and exact strings; optional **vision-API** passes on chart crops for structured series; a small eval set with golden answers; Snowflake behind the same `persistence` interface; and vector index tuning (IVFFLAT / HNSW) at scale.
 
 ---
 

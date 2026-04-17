@@ -179,3 +179,23 @@ def list_metrics_for_client(client_label: str | None, limit: int = 500) -> list[
     from src import database as db
 
     return db.list_metrics_for_client(client_label, limit=limit)
+
+
+def get_document_stored_path(document_name: str, client_label: str | None = None) -> str | None:
+    if use_postgres():
+        from src import postgres_db as db
+
+        return db.get_document_stored_path(document_name, client_label)
+    from src import database as db
+
+    return db.get_document_stored_path(document_name, client_label)
+
+
+def list_chart_chunks(client_label: str | None = None, limit: int = 1200) -> list[dict[str, Any]]:
+    if use_postgres():
+        from src import postgres_db as db
+
+        return db.list_chart_chunks(client_label=client_label, limit=limit)
+    from src import database as db
+
+    return db.list_chart_chunks(client_label=client_label, limit=limit)
